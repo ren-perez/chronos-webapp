@@ -1,22 +1,103 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* Light mode defaults */
+:root,
+[data-theme="light"] {
+  --background: #faf9f7;
+  --foreground: #1c1917;
+  --card: #ffffff;
+  --card-foreground: #1c1917;
+  --secondary: #f0ede8;
+  --secondary-foreground: #1c1917;
+  --muted: #f0ede8;
+  --muted-foreground: #9c958e;
+  --accent: #f5f0eb;
+  --accent-foreground: #1c1917;
+  --border: #e5e2de;
+  --ring: #c2884d;
+  --destructive: #e05252;
+  --destructive-foreground: #ffffff;
+  --chronos-accent: #c2884d;
+  --chronos-accent-foreground: #ffffff;
+  --chronos-glow: rgba(194, 136, 77, 0.15);
+}
+
+/* Dark mode */
+[data-theme="dark"] {
+  --background: #111113;
+  --foreground: #e8e6e3;
+  --card: #1a1a1e;
+  --card-foreground: #e8e6e3;
+  --secondary: #1e1e22;
+  --secondary-foreground: #e8e6e3;
+  --muted: #1e1e22;
+  --muted-foreground: #6b6872;
+  --accent: #252528;
+  --accent-foreground: #e8e6e3;
+  --border: #2a2a2e;
+  --ring: #d4a574;
+  --destructive: #e05252;
+  --destructive-foreground: #ffffff;
+  --chronos-accent: #d4a574;
+  --chronos-accent-foreground: #111113;
+  --chronos-glow: rgba(212, 165, 116, 0.1);
+}
+
+/* Fallback: if no data-theme, use OS preference */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --background: #111113;
+    --foreground: #e8e6e3;
+    --card: #1a1a1e;
+    --card-foreground: #e8e6e3;
+    --secondary: #1e1e22;
+    --secondary-foreground: #e8e6e3;
+    --muted: #1e1e22;
+    --muted-foreground: #6b6872;
+    --accent: #252528;
+    --accent-foreground: #e8e6e3;
+    --border: #2a2a2e;
+    --ring: #d4a574;
+    --destructive: #e05252;
+    --destructive-foreground: #ffffff;
+    --chronos-accent: #d4a574;
+    --chronos-accent-foreground: #111113;
+    --chronos-glow: rgba(212, 165, 116, 0.1);
+  }
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-chronos-accent: var(--chronos-accent);
+  --color-chronos-accent-foreground: var(--chronos-accent-foreground);
+  --color-chronos-glow: var(--chronos-glow);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --animate-pulse-dot: pulse-dot 1.5s ease-in-out infinite;
+  --animate-fade-in: fade-in 0.2s ease-out;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 body {
