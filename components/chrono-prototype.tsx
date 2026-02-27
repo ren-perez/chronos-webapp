@@ -1,10 +1,12 @@
 "use client"
 
 import { useEffect, useCallback, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import { useDeviceState } from "@/hooks/use-device-state"
 import { DeviceEnclosure } from "./device-enclosure"
 import { TrackerDashboard } from "./tracker-dashboard"
 import { OledDisplay } from "./oled-display"
+import { PopupTimerView } from "./popup-timer-view"
 import {
   ChevronUp,
   ChevronDown,
@@ -16,6 +18,8 @@ import {
   Moon,
   Sun,
 } from "lucide-react"
+import { StyleSelector, COLOR_PRESETS, FONT_PRESETS } from "./style-selector"
+import type { ColorKey, FontKey } from "./style-selector"
 
 export function ChronoPrototype() {
   const {
@@ -33,6 +37,11 @@ export function ChronoPrototype() {
     restartTask,
     stopTask,
     deleteSession,
+    addSplit,
+    setActiveSplit,
+    renameSplit,
+    deleteSplit,
+    deleteSplitSession,
     webPlayPause,
     getMenuItems,
   } = useDeviceState()
@@ -41,7 +50,10 @@ export function ChronoPrototype() {
   const [showDevice, setShowDevice] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
   const [theme, setTheme] = useState<"dark" | "light">("dark")
+  const [accentColor, setAccentColor] = useState<ColorKey>("amber")
+  const [displayFont, setDisplayFont] = useState<FontKey>("default")
   const [mounted, setMounted] = useState(false)
+  const [pipWindow, setPipWindow] = useState<Window | null>(null)
 
   useEffect(() => {
     setMounted(true)
@@ -50,14 +62,121 @@ export function ChronoPrototype() {
     const initialTheme = savedTheme || (prefersDark ? "dark" : "light")
     setTheme(initialTheme)
     document.documentElement.setAttribute("data-theme", initialTheme)
+
+    const savedColor = localStorage.getItem("chronos-color") as ColorKey | null
+    if (savedColor && savedColor in COLOR_PRESETS) setAccentColor(savedColor)
+
+    const savedFont = localStorage.getItem("chronos-font") as FontKey | null
+    if (savedFont && savedFont in FONT_PRESETS) setDisplayFont(savedFont)
   }, [])
+
+  // Apply accent color CSS variables when color or theme changes
+  useEffect(() => {
+    if (!mounted) return
+    const preset = COLOR_PRESETS[accentColor]
+    const values = theme === "dark" ? preset.dark : preset.light
+    const root = document.documentElement
+    root.style.setProperty("--chronos-accent", values.accent)
+    root.style.setProperty("--chronos-accent-foreground", values.foreground)
+    root.style.setProperty("--chronos-glow", values.glow)
+    root.style.setProperty("--ring", values.accent)
+
+    // Sync CSS variables to PiP window if open
+    if (pipWindow && !pipWindow.closed) {
+      const pipRoot = pipWindow.document.documentElement
+      pipRoot.style.setProperty("--chronos-accent", values.accent)
+      pipRoot.style.setProperty("--chronos-accent-foreground", values.foreground)
+      pipRoot.style.setProperty("--chronos-glow", values.glow)
+    }
+  }, [accentColor, theme, mounted, pipWindow])
+
+  // Apply display font CSS variable when font changes
+  useEffect(() => {
+    if (!mounted) return
+    const preset = FONT_PRESETS[displayFont]
+    const root = document.documentElement
+    if (preset.family) {
+      root.style.setProperty("--font-timer", preset.family)
+      if (pipWindow && !pipWindow.closed) {
+        pipWindow.document.documentElement.style.setProperty("--font-timer", preset.family)
+      }
+    } else {
+      root.style.removeProperty("--font-timer")
+      if (pipWindow && !pipWindow.closed) {
+        pipWindow.document.documentElement.style.removeProperty("--font-timer")
+      }
+    }
+  }, [displayFont, mounted, pipWindow])
+
+  const handleColorChange = (color: ColorKey) => {
+    setAccentColor(color)
+    localStorage.setItem("chronos-color", color)
+  }
+
+  const handleFontChange = (font: FontKey) => {
+    setDisplayFont(font)
+    localStorage.setItem("chronos-font", font)
+  }
 
   const toggleTheme = () => {
     const newTheme = theme === "dark" ? "light" : "dark"
     setTheme(newTheme)
     localStorage.setItem("chronos-theme", newTheme)
     document.documentElement.setAttribute("data-theme", newTheme)
+    if (pipWindow && !pipWindow.closed) {
+      pipWindow.document.documentElement.setAttribute("data-theme", newTheme)
+    }
   }
+
+  // Open the timer as a floating popup (Document PiP API, or window.open fallback)
+  const openPopout = useCallback(async () => {
+    // Close existing PiP window if already open
+    if (pipWindow && !pipWindow.closed) {
+      pipWindow.close()
+      setPipWindow(null)
+      return
+    }
+
+    const hasPip = "documentPictureInPicture" in window
+
+    if (hasPip) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const pip = await (window as any).documentPictureInPicture.requestWindow({
+          width: 320,
+          height: 200,
+          disallowReturnToOpener: false,
+        })
+
+        // Copy all stylesheets and style tags into the PiP document
+        document.querySelectorAll('link[rel="stylesheet"], style').forEach((el) => {
+          pip.document.head.appendChild(el.cloneNode(true))
+        })
+
+        // Copy theme data-attribute and class list
+        const dataTheme = document.documentElement.getAttribute("data-theme")
+        if (dataTheme) pip.document.documentElement.setAttribute("data-theme", dataTheme)
+        pip.document.documentElement.className = document.documentElement.className
+
+        // Copy inline CSS variables (theme + accent)
+        const rootStyle = document.documentElement.getAttribute("style")
+        if (rootStyle) pip.document.documentElement.setAttribute("style", rootStyle)
+
+        setPipWindow(pip)
+        pip.addEventListener("pagehide", () => setPipWindow(null))
+        return
+      } catch {
+        // Fall through to window.open
+      }
+    }
+
+    // Fallback: open a regular small popup window
+    window.open(
+      "/popup",
+      "chronos-popup",
+      "width=340,height=220,popup=1,resizable=yes"
+    )
+  }, [pipWindow])
 
   const holdKeyRef2 = useRef(false)
   const handleKeyDown = useCallback(
@@ -131,6 +250,12 @@ export function ChronoPrototype() {
             <h1 className="text-sm font-mono font-semibold text-foreground tracking-wide">Chronos</h1>
           </div>
           <div className="flex items-center gap-1.5">
+            <StyleSelector
+              color={accentColor}
+              font={displayFont}
+              onColorChange={handleColorChange}
+              onFontChange={handleFontChange}
+            />
             <button
               onClick={toggleTheme}
               className="p-2 rounded-lg hover:bg-accent transition-colors active:scale-95"
@@ -164,6 +289,7 @@ export function ChronoPrototype() {
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
             <TrackerDashboard
               state={state}
+              timerFont={displayFont}
               onWebPlayPause={webPlayPause}
               onAddTask={addTask}
               onRenameTask={renameTask}
@@ -173,6 +299,13 @@ export function ChronoPrototype() {
               onRestart={restartTask}
               onStop={stopTask}
               onDeleteSession={deleteSession}
+              onAddSplit={addSplit}
+              onSetActiveSplit={setActiveSplit}
+              onRenameSplit={renameSplit}
+              onDeleteSplit={deleteSplit}
+              onDeleteSplitSession={deleteSplitSession}
+              onPopout={openPopout}
+              isPopoutOpen={!!pipWindow && !pipWindow.closed}
             />
           </div>
         </div>
@@ -224,6 +357,16 @@ export function ChronoPrototype() {
           </div>
         )}
       </main>
+
+      {/* Document PiP portal — renders live timer view inside the floating pip window */}
+      {pipWindow && !pipWindow.closed && createPortal(
+        <PopupTimerView
+          tasks={state.tasks}
+          onPlayPause={webPlayPause}
+          onStop={stopTask}
+        />,
+        pipWindow.document.body
+      )}
 
       {/* Help Modal */}
       {showHelp && (

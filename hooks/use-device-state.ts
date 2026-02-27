@@ -5,6 +5,13 @@ import { useState, useCallback, useRef, useEffect } from "react"
 export type TaskStatus = "idle" | "running" | "paused"
 export type TaskMode = "stopwatch" | "timer"
 
+export interface Split {
+  id: string
+  name: string
+  elapsed: number
+  sessions: { start: number; end: number | null }[]
+}
+
 export interface Task {
   id: string
   name: string
@@ -13,6 +20,8 @@ export interface Task {
   mode: TaskMode
   timerDuration: number // ms, only used in timer mode
   sessions: { start: number; end: number | null }[]
+  splits: Split[]
+  activeSplitId: string | null
 }
 
 export type DeviceScreen =
@@ -49,15 +58,73 @@ export interface DeviceState {
 
 const RESET_DURATION = 600 // ms to hold for reset
 const MIN_SESSION_MS = 300 // ignore sessions shorter than this to prevent false positives
+const STORAGE_KEY = "chronos-state-v1"
 
 const DEFAULT_TASKS: Omit<Task, "id">[] = [
-  { name: "Work", elapsed: 0, status: "idle", mode: "stopwatch", timerDuration: 25 * 60 * 1000, sessions: [] },
-  { name: "Study", elapsed: 0, status: "idle", mode: "stopwatch", timerDuration: 25 * 60 * 1000, sessions: [] },
-  { name: "Break", elapsed: 0, status: "idle", mode: "timer", timerDuration: 5 * 60 * 1000, sessions: [] },
+  { name: "Work", elapsed: 0, status: "idle", mode: "stopwatch", timerDuration: 25 * 60 * 1000, sessions: [], splits: [], activeSplitId: null },
+  { name: "Study", elapsed: 0, status: "idle", mode: "stopwatch", timerDuration: 25 * 60 * 1000, sessions: [], splits: [], activeSplitId: null },
+  { name: "Break", elapsed: 0, status: "idle", mode: "timer", timerDuration: 5 * 60 * 1000, sessions: [], splits: [], activeSplitId: null },
 ]
 
 function createId() {
   return Math.random().toString(36).slice(2, 9)
+}
+
+function normalizeSplits(splits: unknown): Split[] {
+  if (!Array.isArray(splits)) return []
+  return splits.map((sp) => ({
+    id: sp.id ?? createId(),
+    name: sp.name ?? "Split",
+    elapsed: sp.elapsed ?? 0,
+    sessions: Array.isArray(sp.sessions) ? sp.sessions : [],
+  }))
+}
+
+function normalizeTask(raw: Partial<Task> & { id: string; name: string }): Task {
+  return {
+    id: raw.id,
+    name: raw.name,
+    elapsed: raw.elapsed ?? 0,
+    status: (raw.status ?? "idle") as TaskStatus,
+    mode: (raw.mode ?? "stopwatch") as TaskMode,
+    timerDuration: raw.timerDuration ?? 25 * 60 * 1000,
+    sessions: Array.isArray(raw.sessions) ? raw.sessions : [],
+    splits: normalizeSplits(raw.splits),
+    activeSplitId: raw.activeSplitId ?? null,
+  }
+}
+
+/** For running tasks, recalculate elapsed from session timestamps so restores are accurate. */
+function recalculateRunning(task: Task): Task {
+  if (task.status !== "running") return task
+  const now = Date.now()
+  let elapsed = 0
+  for (const s of task.sessions) {
+    elapsed += s.end !== null ? s.end - s.start : now - s.start
+  }
+
+  // Recalculate split elapsed too
+  const splits = task.splits.map((sp) => {
+    let splitElapsed = 0
+    for (const s of sp.sessions) {
+      splitElapsed += s.end !== null ? s.end - s.start : now - s.start
+    }
+    return { ...sp, elapsed: splitElapsed }
+  })
+
+  if (task.mode === "timer" && elapsed >= task.timerDuration) {
+    return {
+      ...task,
+      elapsed: task.timerDuration,
+      status: "paused" as TaskStatus,
+      sessions: task.sessions.map((s) => (s.end === null ? { ...s, end: now } : s)),
+      splits: splits.map((sp) => ({
+        ...sp,
+        sessions: sp.sessions.map((s) => (s.end === null ? { ...s, end: now } : s)),
+      })),
+    }
+  }
+  return { ...task, elapsed, splits }
 }
 
 export function useDeviceState() {
@@ -77,20 +144,99 @@ export function useDeviceState() {
   const holdStartTimeRef = useRef<number | null>(null)
   const holdRafRef = useRef<number | null>(null)
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const stateRef = useRef(state)
+  stateRef.current = state
 
-  // Tick ALL running tasks every 100ms (supports background timers)
+  // Load persisted state on mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY)
+      if (raw) {
+        const saved = JSON.parse(raw)
+        if (Array.isArray(saved.tasks) && saved.tasks.length > 0) {
+          const tasks = (saved.tasks as Partial<Task>[])
+            .filter((t) => t.id && t.name)
+            .map((t) => normalizeTask(t as Partial<Task> & { id: string; name: string }))
+            .map(recalculateRunning)
+          setState((prev) => ({
+            ...prev,
+            tasks,
+            activeTaskId: saved.activeTaskId ?? null,
+          }))
+        }
+      }
+    } catch { /* ignore corrupt data */ }
+  }, [])
+
+  // Save to localStorage every 5 s and on page unload
+  useEffect(() => {
+    const save = () => {
+      try {
+        const { tasks, activeTaskId } = stateRef.current
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks, activeTaskId }))
+      } catch { /* ignore quota errors */ }
+    }
+    const interval = setInterval(save, 5000)
+    window.addEventListener("beforeunload", save)
+    return () => {
+      clearInterval(interval)
+      window.removeEventListener("beforeunload", save)
+      save() // flush on unmount too
+    }
+  }, [])
+
+  // Cross-window sync: reload state when another window (e.g. popup) modifies localStorage
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key !== STORAGE_KEY || !e.newValue) return
+      try {
+        const saved = JSON.parse(e.newValue)
+        if (Array.isArray(saved.tasks) && saved.tasks.length > 0) {
+          const tasks = (saved.tasks as Partial<Task>[])
+            .filter((t) => t.id && t.name)
+            .map((t) => normalizeTask(t as Partial<Task> & { id: string; name: string }))
+            .map(recalculateRunning)
+          setState((prev) => ({
+            ...prev,
+            tasks,
+            activeTaskId: saved.activeTaskId ?? null,
+          }))
+        }
+      } catch { /* ignore */ }
+    }
+    window.addEventListener("storage", handleStorage)
+    return () => window.removeEventListener("storage", handleStorage)
+  }, [])
+
+  // Tick ALL running tasks every 100ms using timestamp-based elapsed
+  // (accurate even when the tab is in the background and the interval is throttled)
   useEffect(() => {
     timerRef.current = setInterval(() => {
       setState((prev) => {
         let tasks = prev.tasks
         let screenUpdate = prev.screen
         let anyChanged = false
+        const now = Date.now()
 
         for (const task of tasks) {
           if (task.status !== "running") continue
 
           anyChanged = true
-          const newElapsed = task.elapsed + 100
+          // Compute elapsed from session timestamps — correct regardless of interval throttling
+          let newElapsed = 0
+          for (const s of task.sessions) {
+            newElapsed += s.end !== null ? s.end - s.start : now - s.start
+          }
+
+          // Also update active split elapsed
+          const updatedSplits = task.splits.map((sp) => {
+            if (!sp.sessions.some((s) => s.end === null)) return sp
+            let splitElapsed = 0
+            for (const s of sp.sessions) {
+              splitElapsed += s.end !== null ? s.end - s.start : now - s.start
+            }
+            return { ...sp, elapsed: splitElapsed }
+          })
 
           // Timer mode: stop when elapsed >= duration
           if (task.mode === "timer" && newElapsed >= task.timerDuration) {
@@ -102,9 +248,18 @@ export function useDeviceState() {
                     status: "paused" as TaskStatus,
                     sessions: t.sessions.map((s, i) =>
                       i === t.sessions.length - 1 && s.end === null
-                        ? { ...s, end: Date.now() }
+                        ? { ...s, end: now }
                         : s
                     ),
+                    // Close active split session too
+                    splits: updatedSplits.map((sp) => ({
+                      ...sp,
+                      sessions: sp.sessions.map((s, i) =>
+                        i === sp.sessions.length - 1 && s.end === null
+                          ? { ...s, end: now }
+                          : s
+                      ),
+                    })),
                   }
                 : t
             )
@@ -113,7 +268,7 @@ export function useDeviceState() {
             }
           } else {
             tasks = tasks.map((t) =>
-              t.id === task.id ? { ...t, elapsed: newElapsed } : t
+              t.id === task.id ? { ...t, elapsed: newElapsed, splits: updatedSplits } : t
             )
           }
         }
@@ -172,6 +327,98 @@ export function useDeviceState() {
     return items
   }, [])
 
+  // Helper: close active split session for a given task
+  function closeSplitSession(task: Task, now: number): Split[] {
+    if (!task.activeSplitId) return task.splits
+    return task.splits.map((sp) =>
+      sp.id === task.activeSplitId
+        ? {
+            ...sp,
+            sessions: sp.sessions.map((s, i) =>
+              i === sp.sessions.length - 1 && s.end === null ? { ...s, end: now } : s
+            ),
+          }
+        : sp
+    )
+  }
+
+  // Helper: open a session for the active split
+  function openSplitSession(task: Task, now: number): Split[] {
+    if (!task.activeSplitId) return task.splits
+    return task.splits.map((sp) =>
+      sp.id === task.activeSplitId
+        ? { ...sp, sessions: [...sp.sessions, { start: now, end: null }] }
+        : sp
+    )
+  }
+
+  // Helpers to start/pause a task (timer mode allows background running)
+  const startTask = useCallback((prev: DeviceState, taskId: string): DeviceState => {
+    const task = prev.tasks.find((t) => t.id === taskId)
+    if (!task) return prev
+
+    const now = Date.now()
+
+    // Only pause other tasks if the new task is NOT in timer mode
+    let tasks = prev.tasks
+    if (task.mode !== "timer") {
+      tasks = tasks.map((t) => {
+        if (t.id === taskId || t.status !== "running") return t
+        return {
+          ...t,
+          status: "paused" as TaskStatus,
+          sessions: t.sessions.map((s, i) =>
+            i === t.sessions.length - 1 && s.end === null ? { ...s, end: now } : s
+          ),
+          splits: closeSplitSession(t, now),
+        }
+      })
+    }
+
+    tasks = tasks.map((t) =>
+      t.id === taskId
+        ? {
+            ...t,
+            status: "running" as TaskStatus,
+            sessions: [...t.sessions, { start: now, end: null }],
+            splits: openSplitSession(t, now),
+          }
+        : t
+    )
+    return { ...prev, screen: "task-active", tasks, activeTaskId: taskId, menuIndex: 0 }
+  }, [])
+
+  const pauseTask = useCallback((prev: DeviceState, taskId: string): DeviceState => {
+    const now = Date.now()
+    return {
+      ...prev,
+      screen: "task-paused",
+      menuIndex: 0,
+      tasks: prev.tasks.map((t) => {
+        if (t.id !== taskId) return t
+        // Close the current session
+        const closedSessions = t.sessions.map((s, i) =>
+          i === t.sessions.length - 1 && s.end === null ? { ...s, end: now } : s
+        )
+        // Filter out sessions shorter than MIN_SESSION_MS (false positives from rapid clicking)
+        const lastSession = closedSessions[closedSessions.length - 1]
+        const wasTooShort = lastSession && lastSession.end !== null &&
+          (lastSession.end - lastSession.start) < MIN_SESSION_MS
+        const filteredSessions = wasTooShort ? closedSessions.slice(0, -1) : closedSessions
+        const elapsedAdjust = wasTooShort && lastSession.end !== null
+          ? lastSession.end - lastSession.start
+          : 0
+        return {
+          ...t,
+          status: "paused" as TaskStatus,
+          elapsed: Math.max(0, t.elapsed - elapsedAdjust),
+          sessions: filteredSessions,
+          splits: closeSplitSession(t, now),
+        }
+      }),
+    }
+  }, [])
+
   // ROTATE
   const rotate = useCallback(
     (direction: 1 | -1) => {
@@ -221,69 +468,6 @@ export function useDeviceState() {
     [touch, getMenuItems]
   )
 
-  // Helpers to start/pause a task (timer mode allows background running)
-  const startTask = useCallback((prev: DeviceState, taskId: string): DeviceState => {
-    const task = prev.tasks.find((t) => t.id === taskId)
-    if (!task) return prev
-
-    // Only pause other tasks if the new task is NOT in timer mode
-    let tasks = prev.tasks
-    if (task.mode !== "timer") {
-      tasks = tasks.map((t) =>
-        t.id !== taskId && t.status === "running"
-          ? {
-              ...t,
-              status: "paused" as TaskStatus,
-              sessions: t.sessions.map((s, i) =>
-                i === t.sessions.length - 1 && s.end === null ? { ...s, end: Date.now() } : s
-              ),
-            }
-          : t
-      )
-    }
-
-    tasks = tasks.map((t) =>
-      t.id === taskId
-        ? { 
-            ...t, 
-            status: "running" as TaskStatus, 
-            sessions: [...t.sessions, { start: Date.now(), end: null }] 
-          }
-        : t
-    )
-    return { ...prev, screen: "task-active", tasks, activeTaskId: taskId, menuIndex: 0 }
-  }, [])
-
-  const pauseTask = useCallback((prev: DeviceState, taskId: string): DeviceState => {
-    const now = Date.now()
-    return {
-      ...prev,
-      screen: "task-paused",
-      menuIndex: 0,
-      tasks: prev.tasks.map((t) => {
-        if (t.id !== taskId) return t
-        // Close the current session
-        const closedSessions = t.sessions.map((s, i) =>
-          i === t.sessions.length - 1 && s.end === null ? { ...s, end: now } : s
-        )
-        // Filter out sessions shorter than MIN_SESSION_MS (false positives from rapid clicking)
-        const lastSession = closedSessions[closedSessions.length - 1]
-        const wasTooShort = lastSession && lastSession.end !== null &&
-          (lastSession.end - lastSession.start) < MIN_SESSION_MS
-        const filteredSessions = wasTooShort ? closedSessions.slice(0, -1) : closedSessions
-        const elapsedAdjust = wasTooShort && lastSession.end !== null
-          ? lastSession.end - lastSession.start
-          : 0
-        return {
-          ...t,
-          status: "paused" as TaskStatus,
-          elapsed: Math.max(0, t.elapsed - elapsedAdjust),
-          sessions: filteredSessions,
-        }
-      }),
-    }
-  }, [])
-
   // CLICK
   const click = useCallback(() => {
     touch()
@@ -325,11 +509,19 @@ export function useDeviceState() {
         if (action === "start") return startTask(prev, task.id)
         if (action === "pause") return pauseTask(prev, task.id)
         if (action === "restart") {
-          // Reset elapsed and immediately start
-          let newPrev = {
+          // Reset elapsed + splits sessions, then immediately start
+          const newPrev = {
             ...prev,
             tasks: prev.tasks.map((t) =>
-              t.id === task.id ? { ...t, elapsed: 0, status: "idle" as TaskStatus, sessions: [] } : t
+              t.id === task.id
+                ? {
+                    ...t,
+                    elapsed: 0,
+                    status: "idle" as TaskStatus,
+                    sessions: [],
+                    splits: t.splits.map((sp) => ({ ...sp, elapsed: 0, sessions: [] })),
+                  }
+                : t
             ),
           }
           return startTask(newPrev, task.id)
@@ -396,6 +588,8 @@ export function useDeviceState() {
             mode: "stopwatch",
             timerDuration: 25 * 60 * 1000,
             sessions: [],
+            splits: [],
+            activeSplitId: null,
           }
           const newTasks = [...prev.tasks, newTask]
           return { ...prev, screen: "task-list", tasks: newTasks, selectedIndex: newTasks.length - 1, charPicker: null }
@@ -442,7 +636,15 @@ export function useDeviceState() {
           resetProgress: 0,
           activeTaskId: prev.activeTaskId === task.id ? null : prev.activeTaskId,
           tasks: prev.tasks.map((t) =>
-            t.id === task.id ? { ...t, elapsed: 0, status: "idle" as TaskStatus, sessions: [] } : t
+            t.id === task.id
+              ? {
+                  ...t,
+                  elapsed: 0,
+                  status: "idle" as TaskStatus,
+                  sessions: [],
+                  splits: t.splits.map((sp) => ({ ...sp, elapsed: 0, sessions: [] })),
+                }
+              : t
           ),
         }
       })
@@ -502,7 +704,17 @@ export function useDeviceState() {
         ...prev,
         tasks: [
           ...prev.tasks,
-          { id: createId(), name, elapsed: 0, status: "idle", mode: "stopwatch" as TaskMode, timerDuration: 25 * 60 * 1000, sessions: [] },
+          {
+            id: createId(),
+            name,
+            elapsed: 0,
+            status: "idle" as TaskStatus,
+            mode: "stopwatch" as TaskMode,
+            timerDuration: 25 * 60 * 1000,
+            sessions: [],
+            splits: [],
+            activeSplitId: null,
+          },
         ],
       }))
     },
@@ -565,39 +777,60 @@ export function useDeviceState() {
     (taskId: string) => {
       touch()
       setState((prev) => {
-        // Reset then start
+        // Reset then start — keep split names but clear their elapsed and sessions
         let updated = {
           ...prev,
           tasks: prev.tasks.map((t) =>
-            t.id === taskId ? { ...t, elapsed: 0, status: "idle" as TaskStatus, sessions: [] } : t
+            t.id === taskId
+              ? {
+                  ...t,
+                  elapsed: 0,
+                  status: "idle" as TaskStatus,
+                  sessions: [],
+                  splits: t.splits.map((sp) => ({ ...sp, elapsed: 0, sessions: [] })),
+                }
+              : t
           ),
         }
         // Pause any other running task
         updated = {
           ...updated,
-          tasks: updated.tasks.map((t) =>
-            t.id !== taskId && t.status === "running"
-              ? {
-                  ...t,
-                  status: "paused" as TaskStatus,
-                  sessions: t.sessions.map((s, i) =>
-                    i === t.sessions.length - 1 && s.end === null ? { ...s, end: Date.now() } : s
-                  ),
-                }
-              : t
-          ),
+          tasks: updated.tasks.map((t) => {
+            if (t.id === taskId || t.status !== "running") return t
+            return {
+              ...t,
+              status: "paused" as TaskStatus,
+              sessions: t.sessions.map((s, i) =>
+                i === t.sessions.length - 1 && s.end === null ? { ...s, end: Date.now() } : s
+              ),
+              splits: closeSplitSession(t, Date.now()),
+            }
+          }),
         }
-        // Start the task
+        // Start the task (opens split session if activeSplitId is set)
+        const targetTask = updated.tasks.find((t) => t.id === taskId)
+        if (!targetTask) return prev
+        const now = Date.now()
         updated = {
           ...updated,
           tasks: updated.tasks.map((t) =>
             t.id === taskId
-              ? { ...t, status: "running" as TaskStatus, sessions: [{ start: Date.now(), end: null }] }
+              ? {
+                  ...t,
+                  status: "running" as TaskStatus,
+                  sessions: [{ start: now, end: null }],
+                  splits: openSplitSession(t, now),
+                }
               : t
           ),
           activeTaskId: taskId,
           screen: "task-active" as DeviceScreen,
         }
+        setTimeout(() => {
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: updated.tasks, activeTaskId: updated.activeTaskId }))
+          } catch { /* ignore */ }
+        }, 0)
         return updated
       })
     },
@@ -607,19 +840,33 @@ export function useDeviceState() {
   const stopTask = useCallback(
     (taskId: string) => {
       touch()
-      setState((prev) => ({
-        ...prev,
-        activeTaskId: prev.activeTaskId === taskId ? null : prev.activeTaskId,
-        screen: prev.activeTaskId === taskId ? "task-list" as DeviceScreen : prev.screen,
-        tasks: prev.tasks.map((t) => {
-          if (t.id !== taskId) return t
-          // Close any open session, then reset elapsed/status but keep sessions for the activity log
-          const closedSessions = t.sessions.map((s, i) =>
-            i === t.sessions.length - 1 && s.end === null ? { ...s, end: Date.now() } : s
-          )
-          return { ...t, elapsed: 0, status: "idle" as TaskStatus, sessions: closedSessions }
-        }),
-      }))
+      setState((prev) => {
+        const now = Date.now()
+        const newState = {
+          ...prev,
+          activeTaskId: prev.activeTaskId === taskId ? null : prev.activeTaskId,
+          screen: prev.activeTaskId === taskId ? "task-list" as DeviceScreen : prev.screen,
+          tasks: prev.tasks.map((t) => {
+            if (t.id !== taskId) return t
+            const closedSessions = t.sessions.map((s, i) =>
+              i === t.sessions.length - 1 && s.end === null ? { ...s, end: now } : s
+            )
+            return {
+              ...t,
+              elapsed: 0,
+              status: "idle" as TaskStatus,
+              sessions: closedSessions,
+              splits: closeSplitSession(t, now),
+            }
+          }),
+        }
+        setTimeout(() => {
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: newState.tasks, activeTaskId: newState.activeTaskId }))
+          } catch { /* ignore */ }
+        }, 0)
+        return newState
+      })
     },
     [touch]
   )
@@ -651,14 +898,161 @@ export function useDeviceState() {
     [touch]
   )
 
+  // === SPLIT actions ===
+
+  const addSplit = useCallback(
+    (taskId: string, name: string) => {
+      touch()
+      setState((prev) => {
+        const task = prev.tasks.find((t) => t.id === taskId)
+        if (!task) return prev
+
+        const now = Date.now()
+        const newSplitId = createId()
+
+        // Close current active split session if task is running
+        let splits = task.activeSplitId && task.status === "running"
+          ? closeSplitSession(task, now)
+          : task.splits
+
+        // Create new split — open its session immediately if task is running
+        const newSplit: Split = {
+          id: newSplitId,
+          name,
+          elapsed: 0,
+          sessions: task.status === "running" ? [{ start: now, end: null }] : [],
+        }
+
+        splits = [...splits, newSplit]
+
+        return {
+          ...prev,
+          tasks: prev.tasks.map((t) =>
+            t.id === taskId ? { ...t, splits, activeSplitId: newSplitId } : t
+          ),
+        }
+      })
+    },
+    [touch]
+  )
+
+  const setActiveSplit = useCallback(
+    (taskId: string, splitId: string | null) => {
+      touch()
+      setState((prev) => {
+        const task = prev.tasks.find((t) => t.id === taskId)
+        if (!task) return prev
+
+        const now = Date.now()
+        let splits = task.splits
+
+        // Close current active split session if task is running
+        if (task.status === "running" && task.activeSplitId) {
+          splits = closeSplitSession({ ...task, splits }, now)
+        }
+
+        // Open new split session if task is running and a split is selected
+        if (task.status === "running" && splitId) {
+          splits = openSplitSession({ ...task, splits, activeSplitId: splitId }, now)
+        }
+
+        return {
+          ...prev,
+          tasks: prev.tasks.map((t) =>
+            t.id === taskId ? { ...t, splits, activeSplitId: splitId } : t
+          ),
+        }
+      })
+    },
+    [touch]
+  )
+
+  const renameSplit = useCallback(
+    (taskId: string, splitId: string, name: string) => {
+      touch()
+      setState((prev) => ({
+        ...prev,
+        tasks: prev.tasks.map((t) =>
+          t.id === taskId
+            ? { ...t, splits: t.splits.map((sp) => (sp.id === splitId ? { ...sp, name } : sp)) }
+            : t
+        ),
+      }))
+    },
+    [touch]
+  )
+
+  const deleteSplit = useCallback(
+    (taskId: string, splitId: string) => {
+      touch()
+      setState((prev) => {
+        const task = prev.tasks.find((t) => t.id === taskId)
+        if (!task) return prev
+
+        const now = Date.now()
+        // Close session first if we're deleting the active running split
+        let splits = task.status === "running" && task.activeSplitId === splitId
+          ? closeSplitSession(task, now)
+          : task.splits
+
+        splits = splits.filter((sp) => sp.id !== splitId)
+        const newActiveSplitId = task.activeSplitId === splitId ? null : task.activeSplitId
+
+        return {
+          ...prev,
+          tasks: prev.tasks.map((t) =>
+            t.id === taskId ? { ...t, splits, activeSplitId: newActiveSplitId } : t
+          ),
+        }
+      })
+    },
+    [touch]
+  )
+
+  const deleteSplitSession = useCallback(
+    (taskId: string, splitId: string, sessionStart: number) => {
+      touch()
+      setState((prev) => ({
+        ...prev,
+        tasks: prev.tasks.map((t) => {
+          if (t.id !== taskId) return t
+          return {
+            ...t,
+            splits: t.splits.map((sp) => {
+              if (sp.id !== splitId) return sp
+              const sessionIdx = sp.sessions.findIndex((s) => s.start === sessionStart)
+              if (sessionIdx === -1) return sp
+              const session = sp.sessions[sessionIdx]
+              const duration = session.end !== null
+                ? session.end - session.start
+                : Date.now() - session.start
+              return {
+                ...sp,
+                elapsed: Math.max(0, sp.elapsed - duration),
+                sessions: sp.sessions.filter((_, i) => i !== sessionIdx),
+              }
+            }),
+          }
+        }),
+      }))
+    },
+    [touch]
+  )
+
   const webPlayPause = useCallback(
     (taskId: string) => {
       touch()
       setState((prev) => {
         const task = prev.tasks.find((t) => t.id === taskId)
         if (!task) return prev
-        if (task.status === "running") return pauseTask(prev, taskId)
-        return startTask(prev, taskId)
+        const newState = task.status === "running" ? pauseTask(prev, taskId) : startTask(prev, taskId)
+        // Immediately persist so other windows (popup) get the storage event
+        setTimeout(() => {
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: newState.tasks, activeTaskId: newState.activeTaskId }))
+          } catch { /* ignore */ }
+        }, 0)
+        return newState
       })
     },
     [touch, startTask, pauseTask]
@@ -689,6 +1083,11 @@ export function useDeviceState() {
     restartTask,
     stopTask,
     deleteSession,
+    addSplit,
+    setActiveSplit,
+    renameSplit,
+    deleteSplit,
+    deleteSplitSession,
     webPlayPause,
     goTo,
     totalToday,

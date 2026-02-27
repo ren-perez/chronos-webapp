@@ -1,7 +1,14 @@
 "use client"
 
 import { useState, useRef, useEffect } from "react"
-import type { DeviceState, Task, TaskMode } from "@/hooks/use-device-state"
+import type { DeviceState, Task, TaskMode, Split } from "@/hooks/use-device-state"
+import type { FontKey } from "@/components/style-selector"
+
+function resolveTimerFont(font: FontKey): string | undefined {
+  if (font === "segment") return "'DSEG14 Classic', monospace"
+  if (font === "orbitron") return "var(--font-orbitron)"
+  return undefined
+}
 import { formatElapsed, formatElapsedCompact, formatDuration } from "@/lib/format-time"
 import {
   Play,
@@ -18,10 +25,13 @@ import {
   ChevronLeft,
   ChevronRight,
   MoreHorizontal,
+  PictureInPicture2,
+  Scissors,
 } from "lucide-react"
 
 interface TrackerDashboardProps {
   state: DeviceState
+  timerFont: FontKey
   onWebPlayPause: (taskId: string) => void
   onAddTask: (name: string) => void
   onRenameTask: (taskId: string, newName: string) => void
@@ -31,10 +41,18 @@ interface TrackerDashboardProps {
   onRestart: (taskId: string) => void
   onStop: (taskId: string) => void
   onDeleteSession: (taskId: string, sessionStart: number) => void
+  onAddSplit: (taskId: string, name: string) => void
+  onSetActiveSplit: (taskId: string, splitId: string | null) => void
+  onRenameSplit: (taskId: string, splitId: string, name: string) => void
+  onDeleteSplit: (taskId: string, splitId: string) => void
+  onDeleteSplitSession: (taskId: string, splitId: string, sessionStart: number) => void
+  onPopout?: () => void
+  isPopoutOpen?: boolean
 }
 
 export function TrackerDashboard({
   state,
+  timerFont,
   onWebPlayPause,
   onAddTask,
   onRenameTask,
@@ -44,6 +62,13 @@ export function TrackerDashboard({
   onRestart,
   onStop,
   onDeleteSession,
+  onAddSplit,
+  onSetActiveSplit,
+  onRenameSplit,
+  onDeleteSplit,
+  onDeleteSplitSession,
+  onPopout,
+  isPopoutOpen,
 }: TrackerDashboardProps) {
   // Compute active tasks for the hero section
   const activeTasks = state.tasks.filter(
@@ -67,11 +92,18 @@ export function TrackerDashboard({
       <ActiveTimerSection
         activeTasks={activeTasks}
         heroIndex={clampedHeroIndex}
+        timerFont={timerFont}
         onHeroIndexChange={setHeroIndex}
         onPlayPause={onWebPlayPause}
         onRestart={onRestart}
         onStop={onStop}
         onToggleMode={onToggleMode}
+        onAddSplit={onAddSplit}
+        onSetActiveSplit={onSetActiveSplit}
+        onRenameSplit={onRenameSplit}
+        onDeleteSplit={onDeleteSplit}
+        onPopout={onPopout}
+        isPopoutOpen={isPopoutOpen}
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -92,7 +124,11 @@ export function TrackerDashboard({
         </div>
 
         <div className="lg:col-span-2">
-          <ActivityLog tasks={state.tasks} onDeleteSession={onDeleteSession} />
+          <ActivityLog
+            tasks={state.tasks}
+            onDeleteSession={onDeleteSession}
+            onDeleteSplitSession={onDeleteSplitSession}
+          />
         </div>
       </div>
     </div>
@@ -144,20 +180,60 @@ function ModeToggle({
 function ActiveTimerSection({
   activeTasks,
   heroIndex,
+  timerFont,
   onHeroIndexChange,
   onPlayPause,
   onRestart,
   onStop,
   onToggleMode,
+  onAddSplit,
+  onSetActiveSplit,
+  onRenameSplit,
+  onDeleteSplit,
+  onPopout,
+  isPopoutOpen,
 }: {
   activeTasks: Task[]
   heroIndex: number
+  timerFont: FontKey
   onHeroIndexChange: (idx: number) => void
   onPlayPause: (id: string) => void
   onRestart: (id: string) => void
   onStop: (id: string) => void
   onToggleMode: (id: string) => void
+  onAddSplit: (taskId: string, name: string) => void
+  onSetActiveSplit: (taskId: string, splitId: string | null) => void
+  onRenameSplit: (taskId: string, splitId: string, name: string) => void
+  onDeleteSplit: (taskId: string, splitId: string) => void
+  onPopout?: () => void
+  isPopoutOpen?: boolean
 }) {
+  const [dragStartX, setDragStartX] = useState<number | null>(null)
+  const [dragOffset, setDragOffset] = useState(0)
+  const isDragging = dragStartX !== null
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    setDragStartX(e.clientX)
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (dragStartX === null) return
+    setDragOffset(e.clientX - dragStartX)
+  }
+
+  const handlePointerUp = () => {
+    if (dragStartX === null) return
+    const THRESHOLD = 60
+    if (dragOffset > THRESHOLD) {
+      onHeroIndexChange((heroIndex - 1 + activeTasks.length) % activeTasks.length)
+    } else if (dragOffset < -THRESHOLD) {
+      onHeroIndexChange((heroIndex + 1) % activeTasks.length)
+    }
+    setDragStartX(null)
+    setDragOffset(0)
+  }
+
   if (activeTasks.length === 0) {
     return (
       <div className="rounded-2xl border border-border bg-card p-8 flex flex-col items-center justify-center min-h-60">
@@ -173,10 +249,17 @@ function ActiveTimerSection({
     return (
       <ActiveTimerCard
         task={activeTasks[0]}
+        timerFont={timerFont}
         onPlayPause={onPlayPause}
         onRestart={onRestart}
         onStop={onStop}
         onToggleMode={onToggleMode}
+        onAddSplit={onAddSplit}
+        onSetActiveSplit={onSetActiveSplit}
+        onRenameSplit={onRenameSplit}
+        onDeleteSplit={onDeleteSplit}
+        onPopout={onPopout}
+        isPopoutOpen={isPopoutOpen}
       />
     )
   }
@@ -185,43 +268,49 @@ function ActiveTimerSection({
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Navigation header */}
-      <div className="flex items-center justify-between px-1">
-        <button
-          onClick={() => onHeroIndexChange((heroIndex - 1 + activeTasks.length) % activeTasks.length)}
-          className="flex items-center justify-center w-8 h-8 rounded-lg border border-border hover:bg-accent transition-colors active:scale-95"
-          aria-label="Previous task"
-        >
-          <ChevronLeft className="w-4 h-4 text-muted-foreground" />
-        </button>
-        <div className="flex items-center gap-1.5">
-          {activeTasks.map((t, i) => (
-            <button
-              key={t.id}
-              onClick={() => onHeroIndexChange(i)}
-              className={`rounded-full transition-all ${i === heroIndex
-                ? "w-5 h-1.5 bg-chronos-accent"
-                : "w-1.5 h-1.5 bg-muted-foreground/30 hover:bg-muted-foreground/50"
-                }`}
-              aria-label={`View ${t.name}`}
-            />
-          ))}
-        </div>
-        <button
-          onClick={() => onHeroIndexChange((heroIndex + 1) % activeTasks.length)}
-          className="flex items-center justify-center w-8 h-8 rounded-lg border border-border hover:bg-accent transition-colors active:scale-95"
-          aria-label="Next task"
-        >
-          <ChevronRight className="w-4 h-4 text-muted-foreground" />
-        </button>
+      {/* Dot indicators (centered) */}
+      <div className="flex items-center justify-center gap-1.5 px-1">
+        {activeTasks.map((t, i) => (
+          <button
+            key={t.id}
+            onClick={() => onHeroIndexChange(i)}
+            className={`rounded-full transition-all ${i === heroIndex
+              ? "w-5 h-1.5 bg-chronos-accent"
+              : "w-1.5 h-1.5 bg-muted-foreground/30 hover:bg-muted-foreground/50"
+              }`}
+            aria-label={`View ${t.name}`}
+          />
+        ))}
       </div>
-      <ActiveTimerCard
-        task={task}
-        onPlayPause={onPlayPause}
-        onRestart={onRestart}
-        onStop={onStop}
-        onToggleMode={onToggleMode}
-      />
+      {/* Draggable card */}
+      <div
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        style={{
+          transform: `translateX(${isDragging ? dragOffset * 0.25 : 0}px)`,
+          transition: isDragging ? "none" : "transform 0.2s ease-out",
+          cursor: isDragging ? "grabbing" : "grab",
+          touchAction: "pan-y",
+          userSelect: "none",
+        }}
+      >
+        <ActiveTimerCard
+          task={task}
+          timerFont={timerFont}
+          onPlayPause={onPlayPause}
+          onRestart={onRestart}
+          onStop={onStop}
+          onToggleMode={onToggleMode}
+          onAddSplit={onAddSplit}
+          onSetActiveSplit={onSetActiveSplit}
+          onRenameSplit={onRenameSplit}
+          onDeleteSplit={onDeleteSplit}
+          onPopout={onPopout}
+          isPopoutOpen={isPopoutOpen}
+        />
+      </div>
     </div>
   )
 }
@@ -229,22 +318,38 @@ function ActiveTimerSection({
 // === ACTIVE TIMER CARD ===
 function ActiveTimerCard({
   task,
+  timerFont,
   onPlayPause,
   onRestart,
   onStop,
   onToggleMode,
+  onAddSplit,
+  onSetActiveSplit,
+  onRenameSplit,
+  onDeleteSplit,
+  onPopout,
+  isPopoutOpen,
 }: {
   task: Task
+  timerFont: FontKey
   onPlayPause: (id: string) => void
   onRestart: (id: string) => void
   onStop: (id: string) => void
   onToggleMode: (id: string) => void
+  onAddSplit: (taskId: string, name: string) => void
+  onSetActiveSplit: (taskId: string, splitId: string | null) => void
+  onRenameSplit: (taskId: string, splitId: string, name: string) => void
+  onDeleteSplit: (taskId: string, splitId: string) => void
+  onPopout?: () => void
+  isPopoutOpen?: boolean
 }) {
   const isRunning = task.status === "running"
   const isTimer = task.mode === "timer"
   const display = isTimer ? Math.max(0, task.timerDuration - task.elapsed) : task.elapsed
   const isDone = isTimer && task.elapsed >= task.timerDuration
   const timerProgress = isTimer ? Math.min(1, task.elapsed / task.timerDuration) : 0
+  const timerFontFamily = resolveTimerFont(timerFont)
+  const activeSplit = task.splits.find((s) => s.id === task.activeSplitId)
 
   return (
     <div className={`rounded-2xl border bg-card p-6 sm:p-8 transition-all ${isRunning ? "border-chronos-accent/40 shadow-[0_0_30px_var(--chronos-glow)]" : "border-border"
@@ -261,18 +366,51 @@ function ActiveTimerCard({
             {isDone ? "Complete" : isRunning ? "Running" : "Paused"}
           </span>
         </div>
-        <ModeToggle isTimer={isTimer} onToggle={() => onToggleMode(task.id)} size="md" />
+        <div className="flex items-center gap-2">
+          {onPopout && (
+            <button
+              onClick={onPopout}
+              className={`p-1.5 rounded-md transition-colors active:scale-95 ${
+                isPopoutOpen
+                  ? "text-chronos-accent bg-chronos-accent/10"
+                  : "text-muted-foreground hover:text-foreground hover:bg-accent"
+              }`}
+              aria-label={isPopoutOpen ? "Close popup" : "Pop out timer"}
+              title={isPopoutOpen ? "Close popup" : "Pop out timer"}
+            >
+              <PictureInPicture2 className="w-4 h-4" />
+            </button>
+          )}
+          <ModeToggle isTimer={isTimer} onToggle={() => onToggleMode(task.id)} size="md" />
+        </div>
       </div>
 
       {/* Task name */}
-      <h2 className="text-base sm:text-lg font-mono font-semibold text-foreground/80 mb-4 tracking-wide uppercase line-clamp-1">
+      <h2 className="text-base sm:text-lg font-mono font-semibold text-foreground/80 mb-1 tracking-wide uppercase line-clamp-1">
         {task.name}
       </h2>
 
+      {/* Active split indicator */}
+      {activeSplit ? (
+        <div className="flex items-center gap-1.5 mb-4">
+          <div className={`w-1.5 h-1.5 rounded-full ${isRunning ? "bg-chronos-accent" : "bg-muted-foreground/50"}`} />
+          <span className={`text-xs font-mono ${isRunning ? "text-chronos-accent" : "text-muted-foreground"}`}>
+            {activeSplit.name}
+          </span>
+          <span className="text-[10px] font-mono text-muted-foreground/60 tabular-nums">
+            {activeSplit.elapsed > 0 ? formatElapsed(activeSplit.elapsed) : ""}
+          </span>
+        </div>
+      ) : (
+        <div className="mb-4" />
+      )}
+
       {/* Large timer display */}
       <div className="mb-6 overflow-hidden">
-        <span className={`font-mono text-5xl sm:text-6xl lg:text-7xl font-bold tabular-nums leading-none ${isRunning ? "text-foreground" : "text-foreground/70"
-          }`}>
+        <span
+          className={`font-mono text-5xl sm:text-6xl lg:text-7xl font-bold tabular-nums leading-none ${isRunning ? "text-foreground" : "text-foreground/70"}`}
+          style={timerFontFamily ? { fontFamily: timerFontFamily } : undefined}
+        >
           {isDone ? formatElapsedCompact(task.timerDuration) : formatElapsedCompact(display)}
         </span>
       </div>
@@ -325,6 +463,245 @@ function ActiveTimerCard({
             {task.sessions.length}
           </span>
         </div>
+      </div>
+
+      {/* Splits panel */}
+      <SplitsPanel
+        task={task}
+        onAddSplit={(name) => onAddSplit(task.id, name)}
+        onSetActiveSplit={(splitId) => onSetActiveSplit(task.id, splitId)}
+        onRenameSplit={(splitId, name) => onRenameSplit(task.id, splitId, name)}
+        onDeleteSplit={(splitId) => onDeleteSplit(task.id, splitId)}
+      />
+    </div>
+  )
+}
+
+// === SPLITS PANEL ===
+function SplitsPanel({
+  task,
+  onAddSplit,
+  onSetActiveSplit,
+  onRenameSplit,
+  onDeleteSplit,
+}: {
+  task: Task
+  onAddSplit: (name: string) => void
+  onSetActiveSplit: (splitId: string | null) => void
+  onRenameSplit: (splitId: string, name: string) => void
+  onDeleteSplit: (splitId: string) => void
+}) {
+  const [isAdding, setIsAdding] = useState(false)
+  const [addName, setAddName] = useState("")
+  const addInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (isAdding && addInputRef.current) addInputRef.current.focus()
+  }, [isAdding])
+
+  const handleAdd = () => {
+    const name = addName.trim()
+    if (name) {
+      onAddSplit(name)
+      setAddName("")
+      setIsAdding(false)
+    }
+  }
+
+  return (
+    <div className="mt-5 pt-5 border-t border-border/30">
+      <div className="flex items-center justify-between mb-2.5">
+        <div className="flex items-center gap-1.5">
+          <Scissors className="w-3 h-3 text-muted-foreground" />
+          <span className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground font-semibold">
+            Splits
+          </span>
+          {task.splits.length > 0 && (
+            <span className="text-[10px] font-mono text-muted-foreground/50">
+              {task.splits.length}
+            </span>
+          )}
+        </div>
+        {!isAdding && (
+          <button
+            onClick={() => setIsAdding(true)}
+            className="flex items-center gap-1 text-[11px] font-mono text-muted-foreground hover:text-foreground px-2 py-1 rounded-md hover:bg-accent/50 transition-colors active:scale-95"
+            aria-label="Add split"
+          >
+            <Plus className="w-3 h-3" />
+            Split
+          </button>
+        )}
+      </div>
+
+      {isAdding && (
+        <div className="flex items-center gap-2 mb-2 p-2 rounded-lg border border-chronos-accent/40 bg-chronos-accent/5 animate-fade-in">
+          <input
+            ref={addInputRef}
+            type="text"
+            value={addName}
+            onChange={(e) => setAddName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleAdd()
+              if (e.key === "Escape") { setIsAdding(false); setAddName("") }
+            }}
+            placeholder="Split name..."
+            className="flex-1 bg-transparent font-mono text-sm text-foreground placeholder:text-muted-foreground outline-none min-w-0"
+            maxLength={24}
+            autoComplete="off"
+          />
+          <button
+            onClick={handleAdd}
+            disabled={!addName.trim()}
+            className="flex items-center justify-center w-6 h-6 rounded bg-chronos-accent text-chronos-accent-foreground hover:opacity-90 disabled:opacity-30 active:scale-95 shrink-0"
+            aria-label="Confirm"
+          >
+            <Check className="w-3 h-3" />
+          </button>
+          <button
+            onClick={() => { setIsAdding(false); setAddName("") }}
+            className="flex items-center justify-center w-6 h-6 rounded border border-border hover:bg-accent active:scale-95 shrink-0"
+            aria-label="Cancel"
+          >
+            <X className="w-3 h-3 text-muted-foreground" />
+          </button>
+        </div>
+      )}
+
+      {task.splits.length === 0 && !isAdding && (
+        <p className="text-xs text-muted-foreground/60 font-mono">
+          Add splits to track sub-activities within this task
+        </p>
+      )}
+
+      <div className="flex flex-col gap-0.5">
+        {task.splits.map((split) => (
+          <SplitRow
+            key={split.id}
+            split={split}
+            isActive={split.id === task.activeSplitId}
+            isTaskRunning={task.status === "running"}
+            onSetActive={() => onSetActiveSplit(split.id === task.activeSplitId ? null : split.id)}
+            onRename={(name) => onRenameSplit(split.id, name)}
+            onDelete={() => onDeleteSplit(split.id)}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// === SPLIT ROW ===
+function SplitRow({
+  split,
+  isActive,
+  isTaskRunning,
+  onSetActive,
+  onRename,
+  onDelete,
+}: {
+  split: Split
+  isActive: boolean
+  isTaskRunning: boolean
+  onSetActive: () => void
+  onRename: (name: string) => void
+  onDelete: () => void
+}) {
+  const [isEditing, setIsEditing] = useState(false)
+  const [editName, setEditName] = useState(split.name)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (isEditing && inputRef.current) { inputRef.current.focus(); inputRef.current.select() }
+  }, [isEditing])
+
+  if (isEditing) {
+    return (
+      <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg border border-chronos-accent/40 animate-fade-in">
+        <input
+          ref={inputRef}
+          type="text"
+          value={editName}
+          onChange={(e) => setEditName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { if (editName.trim()) onRename(editName.trim()); setIsEditing(false) }
+            if (e.key === "Escape") { setIsEditing(false); setEditName(split.name) }
+          }}
+          className="flex-1 bg-transparent font-mono text-sm text-foreground outline-none min-w-0"
+          maxLength={24}
+          autoComplete="off"
+        />
+        <button
+          onClick={() => { if (editName.trim()) onRename(editName.trim()); setIsEditing(false) }}
+          className="flex items-center justify-center w-6 h-6 rounded bg-chronos-accent text-chronos-accent-foreground hover:opacity-90 active:scale-95 shrink-0"
+          aria-label="Confirm rename"
+        >
+          <Check className="w-3 h-3" />
+        </button>
+        <button
+          onClick={() => { setIsEditing(false); setEditName(split.name) }}
+          className="flex items-center justify-center w-6 h-6 rounded border border-border hover:bg-accent active:scale-95 shrink-0"
+          aria-label="Cancel"
+        >
+          <X className="w-3 h-3 text-muted-foreground" />
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className={`flex items-center gap-2.5 px-2 py-1.5 rounded-lg cursor-pointer transition-all group/split select-none ${
+        isActive
+          ? "bg-chronos-accent/10 border border-chronos-accent/20"
+          : "border border-transparent hover:bg-accent/40 hover:border-border/50"
+      }`}
+      onClick={onSetActive}
+      title={isActive ? "Deselect split" : "Set as active split"}
+    >
+      {/* Status dot */}
+      <div
+        className={`w-1.5 h-1.5 rounded-full shrink-0 transition-colors ${
+          isActive && isTaskRunning
+            ? "bg-chronos-accent animate-pulse-dot"
+            : isActive
+            ? "bg-chronos-accent/70"
+            : "bg-muted-foreground/25"
+        }`}
+      />
+
+      {/* Name */}
+      <span className={`font-mono text-sm flex-1 truncate transition-colors ${
+        isActive ? "text-foreground font-medium" : "text-foreground/70"
+      }`}>
+        {split.name}
+      </span>
+
+      {/* Elapsed */}
+      <span className={`font-mono text-xs tabular-nums shrink-0 transition-colors ${
+        isActive ? "text-foreground/80" : "text-muted-foreground/60"
+      }`}>
+        {split.elapsed > 0 ? formatElapsed(split.elapsed) : "--:--"}
+      </span>
+
+      {/* Actions (reveal on hover) */}
+      <div className="flex items-center gap-0.5 opacity-0 group-hover/split:opacity-100 transition-opacity shrink-0">
+        <button
+          onClick={(e) => { e.stopPropagation(); setEditName(split.name); setIsEditing(true) }}
+          className="flex items-center justify-center w-5 h-5 rounded text-muted-foreground hover:text-foreground hover:bg-accent active:scale-95 transition-colors"
+          aria-label="Rename split"
+          title="Rename"
+        >
+          <Pencil className="w-3 h-3" />
+        </button>
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete() }}
+          className="flex items-center justify-center w-5 h-5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 active:scale-95 transition-colors"
+          aria-label="Delete split"
+          title="Delete"
+        >
+          <Trash2 className="w-3 h-3" />
+        </button>
       </div>
     </div>
   )
@@ -546,6 +923,7 @@ function TaskRow({
   const isRunning = task.status === "running"
   const isTimer = task.mode === "timer"
   const displayVal = isTimer ? Math.max(0, task.timerDuration - task.elapsed) : task.elapsed
+  const activeSplit = task.splits.find((s) => s.id === task.activeSplitId)
 
   if (isEditing) {
     return (
@@ -609,9 +987,15 @@ function TaskRow({
           <span className={`font-mono text-sm truncate ${isActive ? "text-foreground font-semibold" : "text-foreground"}`}>
             {task.name}
           </span>
-          <span className="text-[11px] font-mono text-muted-foreground">
-            {isTimer ? "Timer" : "Stopwatch"}
-            {task.sessions.length > 0 ? ` \u00b7 ${task.sessions.length}` : ""}
+          <span className="text-[11px] font-mono text-muted-foreground truncate">
+            {activeSplit
+              ? <>{isTimer ? "Timer" : "Stopwatch"} &middot; <span className="text-chronos-accent/70">{activeSplit.name}</span></>
+              : <>
+                  {isTimer ? "Timer" : "Stopwatch"}
+                  {task.splits.length > 0 ? ` · ${task.splits.length} splits` : ""}
+                  {task.sessions.length > 0 && task.splits.length === 0 ? ` · ${task.sessions.length}` : ""}
+                </>
+            }
           </span>
         </div>
 
@@ -683,9 +1067,11 @@ function TaskRow({
 function ActivityLog({
   tasks,
   onDeleteSession,
+  onDeleteSplitSession,
 }: {
   tasks: Task[]
   onDeleteSession: (taskId: string, sessionStart: number) => void
+  onDeleteSplitSession: (taskId: string, splitId: string, sessionStart: number) => void
 }) {
   const [dayOffset, setDayOffset] = useState(0)
 
@@ -708,30 +1094,60 @@ function ActivityLog({
     start: number
     end: number | null
     elapsed: number
+    splitId?: string
+    splitName?: string
   }
 
   const log: LogEntry[] = []
   for (const task of tasks) {
-    const completedSessionsTotal = task.sessions
-      .filter((s) => s.end !== null && s.start >= dayStart && s.start < dayEnd)
-      .reduce((sum, s) => sum + (s.end! - s.start), 0)
+    const hasSplits = task.splits.length > 0
 
-    for (const session of task.sessions) {
-      if (session.start >= dayStart && session.start < dayEnd) {
-        let elapsed: number
-        if (session.end !== null) {
-          elapsed = session.end - session.start
-        } else {
-          elapsed = Math.max(0, task.elapsed - completedSessionsTotal)
+    if (!hasSplits) {
+      // Show task-level sessions as usual
+      const completedSessionsTotal = task.sessions
+        .filter((s) => s.end !== null && s.start >= dayStart && s.start < dayEnd)
+        .reduce((sum, s) => sum + (s.end! - s.start), 0)
+
+      for (const session of task.sessions) {
+        if (session.start >= dayStart && session.start < dayEnd) {
+          let elapsed: number
+          if (session.end !== null) {
+            elapsed = session.end - session.start
+          } else {
+            elapsed = Math.max(0, task.elapsed - completedSessionsTotal)
+          }
+          log.push({
+            taskName: task.name,
+            taskId: task.id,
+            taskMode: task.mode,
+            start: session.start,
+            end: session.end,
+            elapsed,
+          })
         }
-        log.push({
-          taskName: task.name,
-          taskId: task.id,
-          taskMode: task.mode,
-          start: session.start,
-          end: session.end,
-          elapsed,
-        })
+      }
+    } else {
+      // Show per-split sessions
+      for (const split of task.splits) {
+        for (const session of split.sessions) {
+          if (session.start >= dayStart && session.start < dayEnd) {
+            const elapsed = session.end !== null
+              ? session.end - session.start
+              : split.elapsed - split.sessions
+                  .filter((s) => s.end !== null && s.start < session.start)
+                  .reduce((sum, s) => sum + (s.end! - s.start), 0)
+            log.push({
+              taskName: task.name,
+              taskId: task.id,
+              taskMode: task.mode,
+              start: session.start,
+              end: session.end,
+              elapsed: Math.max(0, elapsed),
+              splitId: split.id,
+              splitName: split.name,
+            })
+          }
+        }
       }
     }
   }
@@ -779,6 +1195,23 @@ function ActivityLog({
             .sort(([, a], [, b]) => b - a)
             .map(([name, ms]) => {
               const pct = dayTotal > 0 ? (ms / dayTotal) * 100 : 0
+              // Check if this task has splits to show breakdown
+              const taskObj = tasks.find((t) => t.name === name)
+              const splitBreakdown = taskObj && taskObj.splits.length > 0
+                ? taskObj.splits
+                    .filter((sp) => sp.sessions.some(
+                      (s) => s.start >= dayStart && s.start < dayEnd
+                    ))
+                    .map((sp) => ({
+                      name: sp.name,
+                      elapsed: sp.sessions
+                        .filter((s) => s.start >= dayStart && s.start < dayEnd)
+                        .reduce((sum, s) => sum + (s.end !== null ? s.end - s.start : sp.elapsed), 0),
+                    }))
+                    .filter((sp) => sp.elapsed > 0)
+                    .sort((a, b) => b.elapsed - a.elapsed)
+                : []
+
               return (
                 <div key={name} className="flex flex-col gap-1">
                   <div className="flex items-center justify-between">
@@ -793,6 +1226,27 @@ function ActivityLog({
                       style={{ width: `${pct}%` }}
                     />
                   </div>
+                  {/* Split sub-bars */}
+                  {splitBreakdown.length > 0 && (
+                    <div className="flex flex-col gap-0.5 pl-3 mt-0.5">
+                      {splitBreakdown.map((sp) => {
+                        const spPct = ms > 0 ? (sp.elapsed / ms) * 100 : 0
+                        return (
+                          <div key={sp.name} className="flex items-center gap-2">
+                            <div className="h-1 rounded-full bg-secondary overflow-hidden flex-1">
+                              <div
+                                className="h-full rounded-full bg-chronos-accent/35 transition-all duration-300"
+                                style={{ width: `${spPct}%` }}
+                              />
+                            </div>
+                            <span className="text-[10px] font-mono text-muted-foreground/60 shrink-0 min-w-24 text-right">
+                              {sp.name} &middot; {formatDuration(sp.elapsed)}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
               )
             })}
@@ -825,7 +1279,7 @@ function ActivityLog({
 
               return (
                 <div
-                  key={`${entry.taskId}-${entry.start}`}
+                  key={`${entry.taskId}-${entry.splitId ?? ""}-${entry.start}`}
                   className={`flex items-center justify-between py-2 text-sm group/session ${i < log.length - 1 ? "border-b border-border/30" : ""
                     }`}
                 >
@@ -834,9 +1288,14 @@ function ActivityLog({
                       className={`w-1.5 h-1.5 rounded-full shrink-0 ${entry.end === null ? "bg-chronos-accent animate-pulse-dot" : "bg-muted-foreground/30"
                         }`}
                     />
-                    <span className="font-mono text-sm text-foreground truncate">
-                      {entry.taskName}
-                    </span>
+                    <div className="flex flex-col min-w-0">
+                      <span className="font-mono text-sm text-foreground truncate">
+                        {entry.taskName}
+                        {entry.splitName && (
+                          <span className="text-muted-foreground"> › {entry.splitName}</span>
+                        )}
+                      </span>
+                    </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0 ml-2">
                     <span className="text-[11px] font-mono text-muted-foreground tabular-nums whitespace-nowrap">
@@ -846,7 +1305,11 @@ function ActivityLog({
                       {formatElapsed(entry.elapsed)}
                     </span>
                     <button
-                      onClick={() => onDeleteSession(entry.taskId, entry.start)}
+                      onClick={() =>
+                        entry.splitId
+                          ? onDeleteSplitSession(entry.taskId, entry.splitId, entry.start)
+                          : onDeleteSession(entry.taskId, entry.start)
+                      }
                       className="flex items-center justify-center w-5 h-5 rounded text-muted-foreground/0 group-hover/session:text-muted-foreground hover:text-destructive! transition-colors active:scale-95"
                       aria-label="Delete session"
                       title="Delete session"
